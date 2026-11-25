@@ -12,20 +12,11 @@ on:
       - 'kernel-metadata.json'
       - '.github/workflows/run_minedb_kaggle.yml'
   workflow_dispatch:
-    inputs:
-      wait_for_completion:
-        description: 'Wait and stream status until Kaggle run finishes?'
-        required: false
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
 
 jobs:
-  push-and-run-kaggle:
+  trigger-kaggle:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
@@ -39,46 +30,57 @@ jobs:
       - name: Install Kaggle CLI
         run: pip install --upgrade kaggle six
 
-      - name: Resolve Kaggle username & prepare kernel-metadata.json
+      - name: Sync private secrets dataset & prepare kernel-metadata.json
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
           KAGGLE_USERNAME_VAR: ${{ vars.KAGGLE_USERNAME }}
           KAGGLE_USERNAME_SECRET: ${{ secrets.KAGGLE_USERNAME }}
         run: |
           python - << 'EOF'
-          import json, os, subprocess, urllib.request
+          import json, os, shutil, subprocess
 
           username = (
               os.environ.get("KAGGLE_USERNAME_VAR", "").strip()
               or os.environ.get("KAGGLE_USERNAME_SECRET", "").strip()
           )
-
           if not username:
-              out = subprocess.check_output(["kaggle", "config", "view"], text=True)
-              for line in out.splitlines():
-                  if "username:" in line.lower():
-                      val = line.split(":", 1)[1].strip()
-                      if val and val.lower() != "none":
-                          username = val
-                          break
+              raise RuntimeError("Missing KAGGLE_USERNAME in GitHub Variables or Secrets.")
 
-          if not username:
-              req = urllib.request.Request(
-                  "https://www.kaggle.com/api/v1/users/profile",
-                  headers={"Authorization": f"Bearer {os.environ['KAGGLE_API_TOKEN']}"}
+          # 1. Sync runtime secrets into a private Kaggle Dataset
+          sec_dir = "/tmp/minedb_secrets_pkg"
+          shutil.rmtree(sec_dir, ignore_errors=True)
+          os.makedirs(sec_dir, exist_ok=True)
+
+          secrets_ds_id = f"{username}/minedb-runtime-secrets"
+          with open(os.path.join(sec_dir, "secrets.json"), "w", encoding="utf-8") as f:
+              json.dump({
+                  "MOTHERDUCK_TOKEN": os.environ["MOTHERDUCK_TOKEN"].strip(),
+                  "KAGGLE_USERNAME": username,
+                  "KAGGLE_API_TOKEN": os.environ["KAGGLE_API_TOKEN"].strip(),
+              }, f)
+
+          with open(os.path.join(sec_dir, "dataset-metadata.json"), "w", encoding="utf-8") as f:
+              json.dump({
+                  "title": "MineDB Runtime Secrets",
+                  "id": secrets_ds_id,
+                  "licenses": [{"name": "CC0-1.0"}],
+              }, f, indent=2)
+
+          sec_status = subprocess.run(["kaggle", "datasets", "status", secrets_ds_id], capture_output=True, text=True)
+          if sec_status.returncode == 0:
+              subprocess.run(
+                  ["kaggle", "datasets", "version", "-p", sec_dir, "-m", "Sync runtime secrets", "--dir-mode", "zip"],
+                  check=True,
               )
-              try:
-                  with urllib.request.urlopen(req, timeout=15) as resp:
-                      data = json.loads(resp.read().decode())
-                      username = data.get("userName") or data.get("username")
-              except Exception:
-                  pass
-
-          if not username:
-              raise RuntimeError(
-                  "Could not determine Kaggle username. Add KAGGLE_USERNAME under GitHub Settings -> Secrets and variables -> Actions -> Variables (or Secrets)."
+          else:
+              subprocess.run(
+                  ["kaggle", "datasets", "create", "-p", sec_dir, "--dir-mode", "zip"],
+                  check=True,
               )
+          shutil.rmtree(sec_dir, ignore_errors=True)
 
+          # 2. Update kernel-metadata.json with kernel slug and dataset_sources
           meta_path = "kernel-metadata.json"
           with open(meta_path, "r", encoding="utf-8") as f:
               meta = json.load(f)
@@ -86,14 +88,16 @@ jobs:
           slug = meta["id"].split("/", 1)[1]
           meta["id"] = f"{username}/{slug}"
 
-          ds_id = f"{username}/minedb-cache-14b-awq"
-          ds_check = subprocess.run(["kaggle", "datasets", "status", ds_id], capture_output=True, text=True)
-          if ds_check.returncode == 0:
-              meta["dataset_sources"] = [ds_id]
-              print(f"Attached existing cache dataset: {ds_id}")
+          datasets = [secrets_ds_id]
+          cache_ds_id = f"{username}/minedb-cache-14b-awq"
+          cache_check = subprocess.run(["kaggle", "datasets", "status", cache_ds_id], capture_output=True, text=True)
+          if cache_check.returncode == 0:
+              datasets.append(cache_ds_id)
+              print(f"Attached existing cache dataset: {cache_ds_id}")
           else:
-              print(f"Cache dataset {ds_id} not created yet; notebook will auto-bootstrap it on first run.")
+              print(f"Cache dataset {cache_ds_id} not created yet; notebook will auto-bootstrap it on first run.")
 
+          meta["dataset_sources"] = datasets
           with open(meta_path, "w", encoding="utf-8") as f:
               json.dump(meta, f, indent=2)
 
@@ -102,49 +106,9 @@ jobs:
           print(f"Configured kernel target: {meta['id']}")
           EOF
 
-      - name: Push & Trigger Kaggle GPU Notebook
+      - name: Push & Trigger Kaggle GPU Notebook (Fire & Forget)
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: |
           kaggle kernels push -p . --accelerator NvidiaTeslaT4
-
-      - name: Monitor Kaggle Execution Status
-        if: ${{ github.event.inputs.wait_for_completion != 'false' }}
-        env:
-          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
-        run: |
-          python - << 'EOF'
-          import os, subprocess, time
-
-          kernel_id = os.environ["KERNEL_ID"]
-          print(f"Monitoring {kernel_id} on Kaggle...", flush=True)
-          time.sleep(15)
-
-          while True:
-              res = subprocess.run(
-                  ["kaggle", "kernels", "status", kernel_id],
-                  capture_output=True,
-                  text=True,
-              )
-              status_line = (res.stdout + res.stderr).strip()
-              print(f"[{time.strftime('%H:%M:%S UTC')}] {status_line}", flush=True)
-
-              low = status_line.lower()
-              if "complete" in low:
-                  print("Kaggle notebook completed successfully!")
-                  break
-              if "error" in low or "cancel" in low:
-                  os.makedirs("kaggle_logs", exist_ok=True)
-                  subprocess.run(["kaggle", "kernels", "output", kernel_id, "-p", "kaggle_logs"], check=False)
-                  raise RuntimeError(f"Kaggle notebook failed: {status_line}")
-
-              time.sleep(30)
-          EOF
-
-      - name: Upload Kaggle Logs on Failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kaggle-failure-logs
-          path: kaggle_logs/
-          if-no-files-found: ignore
+          echo "Triggered https://www.kaggle.com/code/$KERNEL_ID — exiting GitHub Actions immediately."
