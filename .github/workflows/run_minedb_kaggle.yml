@@ -8,7 +8,8 @@ on:
     branches:
       - main
     paths:
-      - 'kaggle_kernel/**'
+      - 'minedb_unified_pipeline_14b.ipynb'
+      - 'kernel-metadata.json'
       - '.github/workflows/run_minedb_kaggle.yml'
   workflow_dispatch:
     inputs:
@@ -41,11 +42,11 @@ jobs:
       - name: Resolve Kaggle username & prepare kernel-metadata.json
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USERNAME_VAR: ${{ vars.KAGGLE_USERNAME }}
         run: |
           python - << 'EOF'
-          import json, os, subprocess
+          import json, os, subprocess, urllib.request
 
-          # Fetch authenticated Kaggle username via CLI config/whoami or API
           out = subprocess.check_output(["kaggle", "config", "view"], text=True)
           username = None
           for line in out.splitlines():
@@ -56,8 +57,6 @@ jobs:
                       break
 
           if not username:
-              # Fallback: query Kaggle API /api/v1/users/profile or require KAGGLE_USERNAME variable
-              import urllib.request
               req = urllib.request.Request(
                   "https://www.kaggle.com/api/v1/users/profile",
                   headers={"Authorization": f"Bearer {os.environ['KAGGLE_API_TOKEN']}"}
@@ -75,17 +74,16 @@ jobs:
           if not username:
               raise RuntimeError(
                   "Could not auto-detect Kaggle username from KAGGLE_API_TOKEN. "
-                  "Add a GitHub Repository Variable (or Secret) named KAGGLE_USERNAME."
+                  "Add a GitHub Repository Variable named KAGGLE_USERNAME under Settings -> Secrets and variables -> Actions -> Variables."
               )
 
-          meta_path = "kaggle_kernel/kernel-metadata.json"
+          meta_path = "kernel-metadata.json"
           with open(meta_path, "r", encoding="utf-8") as f:
               meta = json.load(f)
 
           slug = meta["id"].split("/", 1)[1]
           meta["id"] = f"{username}/{slug}"
 
-          # Attach the cache dataset automatically if it already exists on Kaggle
           ds_id = f"{username}/minedb-cache-14b-awq"
           ds_check = subprocess.run(["kaggle", "datasets", "status", ds_id], capture_output=True, text=True)
           if ds_check.returncode == 0:
@@ -101,14 +99,12 @@ jobs:
               env_f.write(f"KERNEL_ID={meta['id']}\n")
           print(f"Configured kernel target: {meta['id']}")
           EOF
-        env:
-          KAGGLE_USERNAME_VAR: ${{ vars.KAGGLE_USERNAME }}
 
       - name: Push & Trigger Kaggle GPU Notebook
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: |
-          kaggle kernels push -p kaggle_kernel --accelerator NvidiaTeslaT4
+          kaggle kernels push -p . --accelerator NvidiaTeslaT4
 
       - name: Monitor Kaggle Execution Status
         if: ${{ github.event.inputs.wait_for_completion != 'false' }}
