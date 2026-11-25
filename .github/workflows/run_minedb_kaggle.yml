@@ -5,12 +5,8 @@ on:
     - cron: "0 */3 * * *"
   workflow_dispatch:
 
-concurrency:
-  group: minedb-kaggle-pipeline
-  cancel-in-progress: false
-
 jobs:
-  run-kaggle-notebook:
+  trigger-kaggle-notebook:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -24,7 +20,7 @@ jobs:
       - name: Install Kaggle CLI
         run: pip install --upgrade kaggle six
 
-      - name: Configure Kaggle credentials & push kernel (Run All)
+      - name: Configure Kaggle credentials & trigger kernel (fire-and-forget)
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME || 'sarangathenuwara' }}
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
@@ -53,7 +49,6 @@ jobs:
           cp ~/.kaggle/kaggle.json ~/.config/kaggle/kaggle.json
           chmod 600 ~/.config/kaggle/kaggle.json
 
-          # Resolve notebook path in repo (supports hyphens/underscores in root or notebooks/)
           NOTEBOOK_SRC=""
           for candidate in \
             "minedb-unified-pipeline-14b.ipynb" \
@@ -97,52 +92,6 @@ jobs:
           }
           EOF
 
-          # 'kaggle kernels push' uploads the notebook and triggers a run on Kaggle
+          # 'kaggle kernels push' uploads & queues execution on Kaggle; exit immediately
           kaggle kernels push -p "$WORK_DIR"
-
-      - name: Monitor Kaggle notebook execution until completion
-        env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME || 'sarangathenuwara' }}
-          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
-          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${KAGGLE_USERNAME:-}" ]; then
-            echo "::error::KAGGLE_USERNAME is not set."
-            exit 1
-          fi
-
-          KERNEL_SLUG="${KAGGLE_USERNAME}/minedb-unified-pipeline"
-          echo "Monitoring Kaggle kernel execution for ${KERNEL_SLUG}..."
-
-          # Give Kaggle a moment to initialize the run after push
-          sleep 10
-
-          DEADLINE=$((SECONDS + 3600))
-          while [ "$SECONDS" -lt "$DEADLINE" ]; do
-            STATUS_OUT=$(kaggle kernels status "$KERNEL_SLUG" 2>&1 || true)
-            echo "$(date -u +'%H:%M:%S UTC') -> ${STATUS_OUT}"
-
-            if echo "$STATUS_OUT" | grep -qiE "complete"; then
-              echo "Kaggle notebook run completed."
-              break
-            fi
-
-            if echo "$STATUS_OUT" | grep -qiE "error|failed|cancel"; then
-              echo "::error::Kaggle notebook execution ended in error/failed/cancelled state: ${STATUS_OUT}"
-              exit 1
-            fi
-
-            if [ "$SECONDS" -ge "$DEADLINE" ]; then
-              echo "::error::Timed out waiting for Kaggle notebook run after 3600s."
-              exit 1
-            fi
-
-            sleep 25
-          done
-
-          mkdir -p /tmp/kaggle_kernel_output
-          kaggle kernels output "$KERNEL_SLUG" -p /tmp/kaggle_kernel_output || true
-          if [ -f /tmp/kaggle_kernel_output/*.log ]; then
-            tail -n 50 /tmp/kaggle_kernel_output/*.log || true
-          fi
+          echo "Triggered Kaggle run for ${KERNEL_SLUG} (run_id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}). Exiting workflow immediately."
