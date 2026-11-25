@@ -43,9 +43,8 @@ jobs:
           username = (
               os.environ.get("KAGGLE_USERNAME_VAR", "").strip()
               or os.environ.get("KAGGLE_USERNAME_SECRET", "").strip()
+              or "sarangathenuwara"
           )
-          if not username:
-              raise RuntimeError("Missing KAGGLE_USERNAME in GitHub Variables or Secrets.")
 
           # 1. Sync runtime secrets into a private Kaggle Dataset
           sec_dir = "/tmp/minedb_secrets_pkg"
