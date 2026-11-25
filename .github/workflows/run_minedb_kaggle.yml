@@ -1,0 +1,152 @@
+name: MineDB Daily Kaggle Pipeline
+
+on:
+  schedule:
+    # Runs every day at 02:00 UTC (06:00 AM UAE / GST)
+    - cron: '0 2 * * *'
+  push:
+    branches:
+      - main
+    paths:
+      - 'kaggle_kernel/**'
+      - '.github/workflows/run_minedb_kaggle.yml'
+  workflow_dispatch:
+    inputs:
+      wait_for_completion:
+        description: 'Wait and stream status until Kaggle run finishes?'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  push-and-run-kaggle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Kaggle CLI
+        run: pip install --upgrade kaggle
+
+      - name: Resolve Kaggle username & prepare kernel-metadata.json
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+        run: |
+          python - << 'EOF'
+          import json, os, subprocess
+
+          # Fetch authenticated Kaggle username via CLI config/whoami or API
+          out = subprocess.check_output(["kaggle", "config", "view"], text=True)
+          username = None
+          for line in out.splitlines():
+              if "username:" in line.lower():
+                  val = line.split(":", 1)[1].strip()
+                  if val and val.lower() != "none":
+                      username = val
+                      break
+
+          if not username:
+              # Fallback: query Kaggle API /api/v1/users/profile or require KAGGLE_USERNAME variable
+              import urllib.request
+              req = urllib.request.Request(
+                  "https://www.kaggle.com/api/v1/users/profile",
+                  headers={"Authorization": f"Bearer {os.environ['KAGGLE_API_TOKEN']}"}
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      data = json.loads(resp.read().decode())
+                      username = data.get("userName") or data.get("username")
+              except Exception:
+                  pass
+
+          if not username:
+              username = os.environ.get("KAGGLE_USERNAME_VAR", "").strip()
+
+          if not username:
+              raise RuntimeError(
+                  "Could not auto-detect Kaggle username from KAGGLE_API_TOKEN. "
+                  "Add a GitHub Repository Variable (or Secret) named KAGGLE_USERNAME."
+              )
+
+          meta_path = "kaggle_kernel/kernel-metadata.json"
+          with open(meta_path, "r", encoding="utf-8") as f:
+              meta = json.load(f)
+
+          slug = meta["id"].split("/", 1)[1]
+          meta["id"] = f"{username}/{slug}"
+
+          # Attach the cache dataset automatically if it already exists on Kaggle
+          ds_id = f"{username}/minedb-cache-14b-awq"
+          ds_check = subprocess.run(["kaggle", "datasets", "status", ds_id], capture_output=True, text=True)
+          if ds_check.returncode == 0:
+              meta["dataset_sources"] = [ds_id]
+              print(f"Attached existing cache dataset: {ds_id}")
+          else:
+              print(f"Cache dataset {ds_id} not created yet; notebook will auto-bootstrap it on first run.")
+
+          with open(meta_path, "w", encoding="utf-8") as f:
+              json.dump(meta, f, indent=2)
+
+          with open(os.environ["GITHUB_ENV"], "a") as env_f:
+              env_f.write(f"KERNEL_ID={meta['id']}\n")
+          print(f"Configured kernel target: {meta['id']}")
+          EOF
+        env:
+          KAGGLE_USERNAME_VAR: ${{ vars.KAGGLE_USERNAME }}
+
+      - name: Push & Trigger Kaggle GPU Notebook
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+        run: |
+          kaggle kernels push -p kaggle_kernel --accelerator NvidiaTeslaT4
+
+      - name: Monitor Kaggle Execution Status
+        if: ${{ github.event.inputs.wait_for_completion != 'false' }}
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+        run: |
+          python - << 'EOF'
+          import os, subprocess, time
+
+          kernel_id = os.environ["KERNEL_ID"]
+          print(f"Monitoring {kernel_id} on Kaggle...", flush=True)
+          time.sleep(15)
+
+          while True:
+              res = subprocess.run(
+                  ["kaggle", "kernels", "status", kernel_id],
+                  capture_output=True,
+                  text=True,
+              )
+              status_line = (res.stdout + res.stderr).strip()
+              print(f"[{time.strftime('%H:%M:%S UTC')}] {status_line}", flush=True)
+
+              low = status_line.lower()
+              if "complete" in low:
+                  print("Kaggle notebook completed successfully!")
+                  break
+              if "error" in low or "cancel" in low:
+                  os.makedirs("kaggle_logs", exist_ok=True)
+                  subprocess.run(["kaggle", "kernels", "output", kernel_id, "-p", "kaggle_logs"], check=False)
+                  raise RuntimeError(f"Kaggle notebook failed: {status_line}")
+
+              time.sleep(30)
+          EOF
+
+      - name: Upload Kaggle Logs on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaggle-failure-logs
+          path: kaggle_logs/
+          if-no-files-found: ignore
