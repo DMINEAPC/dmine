@@ -1,113 +1,122 @@
-name: MineDB Daily Kaggle Pipeline
+name: MineDB Self-Bootstrapping Pipeline
 
 on:
   schedule:
-    # Runs every day at 02:00 UTC (06:00 AM UAE / GST)
-    - cron: '0 2 * * *'
-  push:
-    branches:
-      - main
-    paths:
-      - 'minedb_unified_pipeline_14b.ipynb'
-      - 'kernel-metadata.json'
-      - '.github/workflows/run_minedb_kaggle.yml'
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 jobs:
-  trigger-kaggle:
+  run-kaggle-notebook:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python & Kaggle CLI
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install Kaggle CLI
-        run: pip install --upgrade kaggle six
+        run: pip install --upgrade kaggle
 
-      - name: Sync private secrets dataset & prepare kernel-metadata.json
+      - name: Configure Kaggle credentials & push kernel (Run All)
         env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
-          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
-          KAGGLE_USERNAME_VAR: ${{ vars.KAGGLE_USERNAME }}
-          KAGGLE_USERNAME_SECRET: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
         run: |
-          python - << 'EOF'
-          import json, os, shutil, subprocess
+          set -euo pipefail
+          mkdir -p ~/.kaggle ~/.config/kaggle
+          if [ -n "${KAGGLE_API_TOKEN:-}" ]; then
+            KEY_VAL="${KAGGLE_API_TOKEN}"
+          elif [ -n "${KAGGLE_KEY:-}" ]; then
+            KEY_VAL="${KAGGLE_KEY}"
+          else
+            echo "::error::Neither KAGGLE_API_TOKEN nor KAGGLE_KEY secret is set."
+            exit 1
+          fi
 
-          username = (
-              os.environ.get("KAGGLE_USERNAME_VAR", "").strip()
-              or os.environ.get("KAGGLE_USERNAME_SECRET", "").strip()
-              or "sarangathenuwara"
-          )
+          cat > ~/.kaggle/kaggle.json <<EOF
+          {"username":"${KAGGLE_USERNAME}","key":"${KEY_VAL}"}
+          EOF
+          chmod 600 ~/.kaggle/kaggle.json
+          cp ~/.kaggle/kaggle.json ~/.config/kaggle/kaggle.json
+          chmod 600 ~/.config/kaggle/kaggle.json
 
-          # 1. Sync runtime secrets into a private Kaggle Dataset
-          sec_dir = "/tmp/minedb_secrets_pkg"
-          shutil.rmtree(sec_dir, ignore_errors=True)
-          os.makedirs(sec_dir, exist_ok=True)
+          # Resolve notebook path in repo (supports root or notebooks/ folder)
+          NOTEBOOK_SRC="minedb_unified_pipeline_14b.ipynb"
+          if [ ! -f "$NOTEBOOK_SRC" ] && [ -f "notebooks/minedb_unified_pipeline_14b.ipynb" ]; then
+            NOTEBOOK_SRC="notebooks/minedb_unified_pipeline_14b.ipynb"
+          fi
 
-          secrets_ds_id = f"{username}/minedb-runtime-secrets"
-          with open(os.path.join(sec_dir, "secrets.json"), "w", encoding="utf-8") as f:
-              json.dump({
-                  "MOTHERDUCK_TOKEN": os.environ["MOTHERDUCK_TOKEN"].strip(),
-                  "KAGGLE_USERNAME": username,
-                  "KAGGLE_API_TOKEN": os.environ["KAGGLE_API_TOKEN"].strip(),
-              }, f)
+          WORK_DIR="/tmp/kaggle_kernel_push"
+          rm -rf "$WORK_DIR"
+          mkdir -p "$WORK_DIR"
+          cp "$NOTEBOOK_SRC" "$WORK_DIR/minedb_unified_pipeline_14b.ipynb"
 
-          with open(os.path.join(sec_dir, "dataset-metadata.json"), "w", encoding="utf-8") as f:
-              json.dump({
-                  "title": "MineDB Runtime Secrets",
-                  "id": secrets_ds_id,
-                  "licenses": [{"name": "CC0-1.0"}],
-              }, f, indent=2)
+          KERNEL_SLUG="${KAGGLE_USERNAME}/minedb-unified-pipeline"
 
-          sec_status = subprocess.run(["kaggle", "datasets", "status", secrets_ds_id], capture_output=True, text=True)
-          if sec_status.returncode == 0:
-              subprocess.run(
-                  ["kaggle", "datasets", "version", "-p", sec_dir, "-m", "Sync runtime secrets", "--dir-mode", "zip"],
-                  check=True,
-              )
-          else:
-              subprocess.run(
-                  ["kaggle", "datasets", "create", "-p", sec_dir, "--dir-mode", "zip"],
-                  check=True,
-              )
-          shutil.rmtree(sec_dir, ignore_errors=True)
-
-          # 2. Update kernel-metadata.json with kernel slug and dataset_sources
-          meta_path = "kernel-metadata.json"
-          with open(meta_path, "r", encoding="utf-8") as f:
-              meta = json.load(f)
-
-          slug = meta["id"].split("/", 1)[1]
-          meta["id"] = f"{username}/{slug}"
-
-          datasets = [secrets_ds_id]
-          cache_ds_id = f"{username}/minedb-cache-14b-awq"
-          cache_check = subprocess.run(["kaggle", "datasets", "status", cache_ds_id], capture_output=True, text=True)
-          if cache_check.returncode == 0:
-              datasets.append(cache_ds_id)
-              print(f"Attached existing cache dataset: {cache_ds_id}")
-          else:
-              print(f"Cache dataset {cache_ds_id} not created yet; notebook will auto-bootstrap it on first run.")
-
-          meta["dataset_sources"] = datasets
-          with open(meta_path, "w", encoding="utf-8") as f:
-              json.dump(meta, f, indent=2)
-
-          with open(os.environ["GITHUB_ENV"], "a") as env_f:
-              env_f.write(f"KERNEL_ID={meta['id']}\n")
-          print(f"Configured kernel target: {meta['id']}")
+          cat > "$WORK_DIR/kernel-metadata.json" <<EOF
+          {
+            "id": "${KERNEL_SLUG}",
+            "title": "MineDB Unified Pipeline",
+            "code_file": "minedb_unified_pipeline_14b.ipynb",
+            "language": "python",
+            "kernel_type": "notebook",
+            "is_private": true,
+            "enable_gpu": true,
+            "enable_internet": true,
+            "dataset_sources": [
+              "${KAGGLE_USERNAME}/minedb-cache-3b-v1",
+              "${KAGGLE_USERNAME}/minedb-runtime-secrets"
+            ],
+            "competition_sources": [],
+            "kernel_sources": []
+          }
           EOF
 
-      - name: Push & Trigger Kaggle GPU Notebook (Fire & Forget)
+          # 'kaggle kernels push' uploads the notebook and triggers a run on Kaggle
+          kaggle kernels push -p "$WORK_DIR"
+
+      - name: Monitor Kaggle notebook execution until completion
         env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
         run: |
-          kaggle kernels push -p . --accelerator NvidiaTeslaT4
-          echo "Triggered https://www.kaggle.com/code/$KERNEL_ID — exiting GitHub Actions immediately."
+          set -euo pipefail
+          KERNEL_SLUG="${KAGGLE_USERNAME}/minedb-unified-pipeline"
+          echo "Monitoring Kaggle kernel execution for ${KERNEL_SLUG}..."
+
+          # Give Kaggle a moment to initialize the run after push
+          sleep 10
+
+          DEADLINE=$((SECONDS + 3600))
+          while [ "$SECONDS" -lt "$DEADLINE" ]; do
+            STATUS_OUT=$(kaggle kernels status "$KERNEL_SLUG" 2>&1 || true)
+            echo "$(date -u +'%H:%M:%S UTC') -> ${STATUS_OUT}"
+
+            if echo "$STATUS_OUT" | grep -qiE "complete"; then
+              echo "Kaggle notebook run completed."
+              break
+            fi
+
+            if echo "$STATUS_OUT" | grep -qiE "error|failed|cancel"; then
+              echo "::error::Kaggle notebook execution ended in error/failed/cancelled state: ${STATUS_OUT}"
+              exit 1
+            fi
+
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "::error::Timed out waiting for Kaggle notebook run after 3600s."
+              exit 1
+            fi
+
+            sleep 25
+          done
+
+          mkdir -p /tmp/kaggle_kernel_output
+          kaggle kernels output "$KERNEL_SLUG" -p /tmp/kaggle_kernel_output || true
+          if [ -f /tmp/kaggle_kernel_output/*.log ]; then
+            tail -n 50 /tmp/kaggle_kernel_output/*.log || true
+          fi
