@@ -18,7 +18,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Kaggle CLI
-        run: pip install --upgrade kaggle
+        run: pip install --upgrade kaggle six
 
       - name: Configure Kaggle credentials & push kernel (Run All)
         env:
@@ -27,6 +27,11 @@ jobs:
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
         run: |
           set -euo pipefail
+          if [ -z "${KAGGLE_USERNAME:-}" ]; then
+            echo "::error::KAGGLE_USERNAME secret is not set."
+            exit 1
+          fi
+
           mkdir -p ~/.kaggle ~/.config/kaggle
           if [ -n "${KAGGLE_API_TOKEN:-}" ]; then
             KEY_VAL="${KAGGLE_API_TOKEN}"
@@ -44,10 +49,22 @@ jobs:
           cp ~/.kaggle/kaggle.json ~/.config/kaggle/kaggle.json
           chmod 600 ~/.config/kaggle/kaggle.json
 
-          # Resolve notebook path in repo (supports root or notebooks/ folder)
-          NOTEBOOK_SRC="minedb-unified-pipeline-14b.ipynb"
-          if [ ! -f "$NOTEBOOK_SRC" ] && [ -f "notebooks/minedb-unified-pipeline-14b.ipynb" ]; then
-            NOTEBOOK_SRC="notebooks/minedb-unified-pipeline-14b.ipynb"
+          # Resolve notebook path in repo (supports hyphens/underscores in root or notebooks/)
+          NOTEBOOK_SRC=""
+          for candidate in \
+            "minedb-unified-pipeline-14b.ipynb" \
+            "minedb_unified_pipeline_14b.ipynb" \
+            "notebooks/minedb-unified-pipeline-14b.ipynb" \
+            "notebooks/minedb_unified_pipeline_14b.ipynb"; do
+            if [ -f "$candidate" ]; then
+              NOTEBOOK_SRC="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$NOTEBOOK_SRC" ]; then
+            echo "::error::Could not find notebook file in repository."
+            exit 1
           fi
 
           WORK_DIR="/tmp/kaggle_kernel_push"
@@ -86,6 +103,11 @@ jobs:
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
         run: |
           set -euo pipefail
+          if [ -z "${KAGGLE_USERNAME:-}" ]; then
+            echo "::error::KAGGLE_USERNAME secret is not set."
+            exit 1
+          fi
+
           KERNEL_SLUG="${KAGGLE_USERNAME}/minedb-unified-pipeline"
           echo "Monitoring Kaggle kernel execution for ${KERNEL_SLUG}..."
 
