@@ -45,15 +45,15 @@ jobs:
           chmod 600 ~/.config/kaggle/kaggle.json
 
           # Resolve notebook path in repo (supports root or notebooks/ folder)
-          NOTEBOOK_SRC="minedb_unified_pipeline_14b.ipynb"
-          if [ ! -f "$NOTEBOOK_SRC" ] && [ -f "notebooks/minedb_unified_pipeline_14b.ipynb" ]; then
-            NOTEBOOK_SRC="notebooks/minedb_unified_pipeline_14b.ipynb"
+          NOTEBOOK_SRC="minedb-unified-pipeline-14b.ipynb"
+          if [ ! -f "$NOTEBOOK_SRC" ] && [ -f "notebooks/minedb-unified-pipeline-14b.ipynb" ]; then
+            NOTEBOOK_SRC="notebooks/minedb-unified-pipeline-14b.ipynb"
           fi
 
           WORK_DIR="/tmp/kaggle_kernel_push"
           rm -rf "$WORK_DIR"
           mkdir -p "$WORK_DIR"
-          cp "$NOTEBOOK_SRC" "$WORK_DIR/minedb_unified_pipeline_14b.ipynb"
+          cp "$NOTEBOOK_SRC" "$WORK_DIR/minedb-unified-pipeline-14b.ipynb"
 
           KERNEL_SLUG="${KAGGLE_USERNAME}/minedb-unified-pipeline"
 
@@ -61,7 +61,7 @@ jobs:
           {
             "id": "${KERNEL_SLUG}",
             "title": "MineDB Unified Pipeline",
-            "code_file": "minedb_unified_pipeline_14b.ipynb",
+            "code_file": "minedb-unified-pipeline-14b.ipynb",
             "language": "python",
             "kernel_type": "notebook",
             "is_private": true,
