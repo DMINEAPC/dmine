@@ -37,24 +37,30 @@ jobs:
           python-version: '3.11'
 
       - name: Install Kaggle CLI
-        run: pip install --upgrade kaggle
+        run: pip install --upgrade kaggle six
 
       - name: Resolve Kaggle username & prepare kernel-metadata.json
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
           KAGGLE_USERNAME_VAR: ${{ vars.KAGGLE_USERNAME }}
+          KAGGLE_USERNAME_SECRET: ${{ secrets.KAGGLE_USERNAME }}
         run: |
           python - << 'EOF'
           import json, os, subprocess, urllib.request
 
-          out = subprocess.check_output(["kaggle", "config", "view"], text=True)
-          username = None
-          for line in out.splitlines():
-              if "username:" in line.lower():
-                  val = line.split(":", 1)[1].strip()
-                  if val and val.lower() != "none":
-                      username = val
-                      break
+          username = (
+              os.environ.get("KAGGLE_USERNAME_VAR", "").strip()
+              or os.environ.get("KAGGLE_USERNAME_SECRET", "").strip()
+          )
+
+          if not username:
+              out = subprocess.check_output(["kaggle", "config", "view"], text=True)
+              for line in out.splitlines():
+                  if "username:" in line.lower():
+                      val = line.split(":", 1)[1].strip()
+                      if val and val.lower() != "none":
+                          username = val
+                          break
 
           if not username:
               req = urllib.request.Request(
@@ -69,12 +75,8 @@ jobs:
                   pass
 
           if not username:
-              username = os.environ.get("KAGGLE_USERNAME_VAR", "").strip()
-
-          if not username:
               raise RuntimeError(
-                  "Could not auto-detect Kaggle username from KAGGLE_API_TOKEN. "
-                  "Add a GitHub Repository Variable named KAGGLE_USERNAME under Settings -> Secrets and variables -> Actions -> Variables."
+                  "Could not determine Kaggle username. Add KAGGLE_USERNAME under GitHub Settings -> Secrets and variables -> Actions -> Variables (or Secrets)."
               )
 
           meta_path = "kernel-metadata.json"
